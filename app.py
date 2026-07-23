@@ -490,6 +490,25 @@ def render_band(label, value, max_value, color_key, description):
     )
 
 
+def render_band_compact(label, value, max_value, color_key):
+    color = BAND_COLORS[color_key]
+    width_pct = max(4, min(100, abs(value) / max_value * 100)) if max_value else 4
+    st.markdown(
+        f"""
+        <div style="margin-bottom:4px;">
+            <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:1px;">
+                <span>{label}</span>
+                <span><strong>{inr_l(value)}</strong></span>
+            </div>
+            <div style="background:#EEEEEE; border-radius:3px; height:12px; width:100%;">
+                <div style="background:{color}; width:{width_pct:.1f}%; height:12px; border-radius:3px;"></div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # SESSION STATE
 # ---------------------------------------------------------------------------
@@ -593,6 +612,23 @@ with tab1:
                             st.rerun()
     else:
         st.caption("Click any product tile above to view its full details.")
+
+    st.divider()
+
+    st.subheader("Household P&L snapshot")
+    st.caption("The same household, seen as one P&L instead of six. Full breakdown is in the "
+               "Operating Model and P&L Engine tab.")
+
+    bands_compact = build_household_bands(hh)
+    max_val_compact = max(
+        abs(bands_compact["band1"]), abs(bands_compact["band2"]),
+        abs(bands_compact["band3"]), abs(bands_compact["band4"]), 1,
+    )
+    with st.container(border=True):
+        render_band_compact("Revenue", bands_compact["band1"], max_val_compact, "band1")
+        render_band_compact("Cost to serve", -bands_compact["band2"], max_val_compact, "band2")
+        render_band_compact("Transfer charges and risk charge", -bands_compact["band3"], max_val_compact, "band3")
+        render_band_compact("Contribution margin", bands_compact["band4"], max_val_compact, "band4")
 
     st.divider()
 
