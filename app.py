@@ -1,10 +1,12 @@
 """
-EKAM — One Customer Graph Prototype
-------------------------------------
-Tab 1: Steward Dashboard    -> banker/admin view of ONE household, with clickable
-                               product tiles that drill into full detail
-Tab 2: Backend / P&L Engine -> product P&L vs household P&L, transfer pricing,
-                               with clickable silos that mirror the same drill-down
+Ekam: One Customer Graph
+A live demo accompanying the Axis Bank 2035 transformation pitch.
+
+Tab 1, Steward Dashboard: the banker admin view of a single household, with
+clickable product tiles that open full underlying detail.
+
+Tab 2, Operating Model and P&L Engine: how the household P&L, transfer
+pricing, and enterprise impact case actually work underneath the dashboard.
 
 Run with:
     pip install streamlit pandas
@@ -15,275 +17,366 @@ import copy
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="EKAM — One Customer Graph", layout="wide")
+st.set_page_config(page_title="Ekam: One Customer Graph", layout="wide")
+
+USD_INR = 83.0
+
+
+def inr_l(amount):
+    """Format a rupee amount as lakhs, Indian convention, e.g. 588200 -> 'Rs 5.88 L'."""
+    sign = "-" if amount < 0 else ""
+    return f"{sign}Rs {abs(amount) / 100000:,.2f} L"
+
+
+def inr_plain(amount):
+    """Format a rupee amount plainly with comma separators."""
+    sign = "-" if amount < 0 else ""
+    return f"{sign}Rs {abs(amount):,.0f}"
+
+
+def calc_emi(principal, annual_rate, years):
+    r = annual_rate / 12
+    n = years * 12
+    if r == 0:
+        return principal / n
+    return principal * r * (1 + r) ** n / ((1 + r) ** n - 1)
+
 
 # ---------------------------------------------------------------------------
-# MOCK DATA
-# Each product carries:
-#   value / status / flag  -> shown on the tile itself
-#   details                -> read-only info shown when you click the tile
-#   cross_sell_fields       -> if present, an admin form is shown to add new info
+# HOUSEHOLD DATA
+# Each product carries a "financials" dict (the numbers a real system would
+# hold) and a "meta" dict (static descriptive fields). Display details and
+# P&L breakdowns are both derived from these, so the two tabs stay consistent
+# with each other.
 # ---------------------------------------------------------------------------
 
 HOUSEHOLDS_SEED = {
-    "Rohan Mehta — Salaried, Mumbai": {
+    "Rohan Mehta, Salaried, Mumbai": {
         "tier": "Mass",
-        "ratio": "1 steward : 3,000–5,000 households",
+        "ratio": "1 steward per 3,000 to 5,000 households",
         "health_score": 78,
-        "primacy": "CASA share 62%",
-        "cross_sell_depth": 2.4,
+        "primacy": "CASA share 62 percent",
+        "cross_sell_depth": 2.2,
         "products": {
             "Deposits": {
-                "value": "₹4.2L", "status": "Active", "flag": None,
-                "details": {
-                    "Savings balance": "₹2.8L",
-                    "Fixed deposit balance": "₹1.4L",
-                    "Average monthly balance": "₹3.5L",
-                    "Interest rate": "3.5% p.a.",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"balance": 420000, "deposit_rate": 0.035, "asset_yield": 0.070},
             },
             "Loans": {
-                "value": "Home loan — ₹68L", "status": "In underwriting", "flag": "New application",
-                "details": {
-                    "Principal amount": "₹68,00,000",
-                    "Tenure": "20 years",
-                    "Interest rate": "8.65% (floating)",
-                    "EMI": "₹59,800/month",
-                    "Purpose": "Home purchase",
-                    "Collateral": "Property under registration",
+                "status": "In underwriting", "flag": "New application",
+                "financials": {
+                    "principal": 6800000, "rate": 0.0865, "cost_of_funds": 0.065,
+                    "provisioning": 0.004, "opex": 0.003, "tenure_years": 20,
                 },
+                "meta": {"purpose": "Home purchase", "collateral": "Property under registration"},
             },
             "Cards": {
-                "value": "2 cards active", "status": "Active", "flag": None,
-                "details": {
-                    "Cards held": "2 (1 rewards, 1 travel)",
-                    "Credit limit": "₹3,00,000",
-                    "Utilisation": "22%",
-                    "Credit score": "762",
-                    "Transaction fees (YTD)": "₹1,200",
-                    "Customer acquisition cost": "₹450",
+                "status": "Active", "flag": None,
+                "financials": {
+                    "limit": 300000, "utilization": 0.22, "annual_spend": 180000,
+                    "interchange_rate": 0.015, "annual_fee": 1000, "acquisition_cost": 450,
+                    "loss_rate": 0.006, "credit_score": 762,
                 },
             },
             "Insurance": {
-                "value": "None", "status": "Not enrolled", "flag": "Cross-sell opportunity",
-                "details": {
-                    "Current life cover": "None",
-                    "Current health cover": "None",
-                    "Nominee on file (from KYC)": "Priya Mehta (spouse)",
-                    "Related signal": "Home loan in underwriting — insurance typically bundled at disbursement",
-                },
+                "status": "Not enrolled", "flag": "Cross-sell opportunity",
+                "financials": {"premium": 0},
+                "meta": {"nominee_on_file": "Priya Mehta, spouse, from KYC",
+                         "signal": "Home loan in underwriting: insurance is typically bundled at disbursement"},
                 "cross_sell_fields": [
-                    {"label": "Policy type", "type": "select", "options": ["Term life", "Health", "Term + Health bundle", "Home loan protection"]},
-                    {"label": "Sum assured (₹)", "type": "number", "default": 5000000},
-                    {"label": "Annual premium (₹)", "type": "number", "default": 18000},
+                    {"label": "Policy type", "type": "select",
+                     "options": ["Term life", "Health", "Term and health bundle", "Home loan protection"]},
+                    {"label": "Sum assured (Rs)", "type": "number", "default": 5000000},
+                    {"label": "Annual premium (Rs)", "type": "number", "default": 18000},
                     {"label": "Payment frequency", "type": "select", "options": ["Monthly", "Quarterly", "Annual"]},
                 ],
             },
             "Wealth": {
-                "value": "₹3.1L SIPs", "status": "Active", "flag": None,
-                "details": {
-                    "Portfolio value": "₹3,10,000",
-                    "Funds held": "3 mutual funds",
-                    "Monthly SIP": "₹15,000",
-                    "Risk profile": "Moderate",
-                    "Returns (YTD)": "11.2%",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"aum": 310000, "fee_rate": 0.010, "advisory_cost_rate": 0.003,
+                               "returns_ytd": 0.112, "monthly_sip": 15000},
+                "meta": {"risk_profile": "Moderate", "funds_held": "3 mutual funds"},
             },
             "Forex": {
-                "value": "$5,000 remittance pending", "status": "Queued", "flag": "Pricing decision needed",
-                "details": {
-                    "Amount": "$5,000",
-                    "Purpose": "Education — dependent's tuition",
-                    "Current pricing tier": "Standard desk rate",
-                    "Standard markup": "2.5–3.5%",
-                    "Ekam household rate": "~0% (netting cost)",
-                },
+                "status": "Queued", "flag": "Pricing decision needed",
+                "financials": {"annual_usd": 5000, "markup_today": 0.030, "netting_cost_rate": 0.002},
+                "meta": {"purpose": "Education, dependent's tuition"},
                 "cross_sell_fields": [
-                    {"label": "Approve household pricing tier", "type": "select", "options": ["Zero-margin (Ekam household rate)", "Standard desk rate (override)"]},
-                    {"label": "Approved by (steward name)", "type": "text", "default": ""},
+                    {"label": "Approve household pricing tier", "type": "select",
+                     "options": ["Zero-margin, Ekam household rate", "Standard desk rate, override"]},
+                    {"label": "Approved by, steward name", "type": "text", "default": ""},
                 ],
             },
         },
     },
-    "Priya Nair — MSME Owner": {
+    "Priya Nair, MSME Owner": {
         "tier": "Complex",
-        "ratio": "1 squad+bench : 250–400 households",
+        "ratio": "1 squad and bench per 250 to 400 households",
         "health_score": 85,
-        "primacy": "CASA share 71%",
+        "primacy": "CASA share 71 percent",
         "cross_sell_depth": 3.1,
         "products": {
             "Deposits": {
-                "value": "₹22L (business + personal)", "status": "Active", "flag": None,
-                "details": {
-                    "Business account balance": "₹18,00,000",
-                    "Personal account balance": "₹4,00,000",
-                    "Average balance": "₹20,00,000",
-                    "Interest rate": "3.2% p.a.",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"balance": 2200000, "deposit_rate": 0.032, "asset_yield": 0.070},
             },
             "Loans": {
-                "value": "Working capital — ₹1.2Cr", "status": "Active", "flag": None,
-                "details": {
-                    "Principal / limit": "₹1,20,00,000",
-                    "Type": "Revolving working capital",
-                    "Interest rate": "10.25%",
-                    "Current utilisation": "68%",
-                    "Purpose": "Inventory financing",
+                "status": "Active", "flag": None,
+                "financials": {
+                    "principal": 12000000, "rate": 0.1025, "cost_of_funds": 0.075,
+                    "provisioning": 0.008, "opex": 0.004, "tenure_years": None,
+                    "revolving": True, "utilization": 0.68,
                 },
+                "meta": {"purpose": "Inventory financing", "type": "Revolving working capital"},
             },
             "Cards": {
-                "value": "Business credit card", "status": "Active", "flag": None,
-                "details": {
-                    "Cards held": "1 business card",
-                    "Credit limit": "₹10,00,000",
-                    "Utilisation": "35%",
-                    "Credit score": "781",
-                    "Transaction fees (YTD)": "₹8,400",
-                    "Customer acquisition cost": "₹600",
+                "status": "Active", "flag": None,
+                "financials": {
+                    "limit": 1000000, "utilization": 0.35, "annual_spend": 1200000,
+                    "interchange_rate": 0.015, "annual_fee": 2500, "acquisition_cost": 600,
+                    "loss_rate": 0.007, "credit_score": 781,
                 },
             },
             "Insurance": {
-                "value": "Key-person cover", "status": "Active", "flag": None,
-                "details": {
-                    "Policy": "Key-person cover",
-                    "Sum assured": "₹50,00,000",
-                    "Annual premium": "₹42,000",
-                    "Renewal date": "March 2027",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"premium": 42000, "commission_rate": 0.15},
+                "meta": {"policy": "Key-person cover", "sum_assured": "Rs 50,00,000", "renewal": "March 2027"},
             },
             "Wealth": {
-                "value": "₹40L portfolio", "status": "Active", "flag": None,
-                "details": {
-                    "Portfolio value": "₹40,00,000",
-                    "Mandate": "Balanced / growth",
-                    "Risk profile": "Growth",
-                    "Returns (YTD)": "9.8%",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"aum": 4000000, "fee_rate": 0.010, "advisory_cost_rate": 0.003, "returns_ytd": 0.098},
+                "meta": {"risk_profile": "Growth", "mandate": "Balanced"},
             },
             "Forex": {
-                "value": "Import payments — monthly", "status": "Active", "flag": "Recurring volume, review pricing tier",
-                "details": {
-                    "Pattern": "Recurring monthly import remittance",
-                    "Average volume": "$8,000/month",
-                    "Current pricing tier": "Standard desk rate (1.8%)",
-                    "Eligible for": "Household-tier pricing upgrade",
-                },
+                "status": "Active", "flag": "Recurring volume, review pricing tier",
+                "financials": {"annual_usd": 96000, "markup_today": 0.018, "netting_cost_rate": 0.003},
+                "meta": {"pattern": "Recurring monthly import remittance, average $8,000 per month"},
                 "cross_sell_fields": [
-                    {"label": "Recommended pricing tier", "type": "select", "options": ["Household-preferred (0.5%)", "Zero-margin (Ekam)", "Keep standard desk rate"]},
+                    {"label": "Recommended pricing tier", "type": "select",
+                     "options": ["Household-preferred, 0.5 percent", "Zero-margin, Ekam", "Keep standard desk rate"]},
                     {"label": "Steward sign-off", "type": "text", "default": ""},
                 ],
             },
         },
     },
-    "The Kapoor Family — NRI-Linked": {
+    "The Kapoor Family, NRI-Linked": {
         "tier": "Private",
-        "ratio": "1 dedicated squad : 30–60 households",
+        "ratio": "1 dedicated squad per 30 to 60 households",
         "health_score": 91,
-        "primacy": "CASA share 80%",
-        "cross_sell_depth": 4.0,
+        "primacy": "CASA share 80 percent",
+        "cross_sell_depth": 4.2,
         "products": {
             "Deposits": {
-                "value": "₹1.1Cr (NRE/NRO)", "status": "Active", "flag": None,
-                "details": {
-                    "NRE balance": "₹70,00,000",
-                    "NRO balance": "₹41,00,000",
-                    "Interest rate": "4.1% p.a.",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"balance": 11100000, "deposit_rate": 0.041, "asset_yield": 0.070},
             },
             "Loans": {
-                "value": "None", "status": "—", "flag": None,
-                "details": {"Current exposure": "None on record"},
+                "status": "No active exposure", "flag": None,
+                "financials": {"principal": 0, "rate": 0, "cost_of_funds": 0, "provisioning": 0, "opex": 0},
             },
             "Cards": {
-                "value": "3 cards, multi-currency", "status": "Active", "flag": None,
-                "details": {
-                    "Cards held": "3, multi-currency",
-                    "Combined credit limit": "₹8,00,000",
-                    "Utilisation": "14%",
-                    "Credit score": "812",
-                    "Transaction fees (YTD)": "₹5,600",
-                    "Customer acquisition cost": "₹900",
+                "status": "Active", "flag": None,
+                "financials": {
+                    "limit": 800000, "utilization": 0.14, "annual_spend": 900000,
+                    "interchange_rate": 0.015, "annual_fee": 5000, "acquisition_cost": 900,
+                    "loss_rate": 0.003, "credit_score": 812,
                 },
             },
             "Insurance": {
-                "value": "Family floater + term", "status": "Active", "flag": None,
-                "details": {
-                    "Policy": "Family floater + term life",
-                    "Sum assured": "₹1,00,00,000",
-                    "Annual premium": "₹1,10,000",
-                    "Renewal date": "January 2027",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"premium": 110000, "commission_rate": 0.15},
+                "meta": {"policy": "Family floater and term life", "sum_assured": "Rs 1,00,00,000", "renewal": "January 2027"},
             },
             "Wealth": {
-                "value": "₹2.4Cr AUM (Burgundy)", "status": "Active", "flag": None,
-                "details": {
-                    "AUM": "₹2,40,00,000",
-                    "Tier": "Burgundy",
-                    "Portfolio": "Diversified — equity, debt, alternates",
-                    "Returns (YTD)": "13.4%",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"aum": 24000000, "fee_rate": 0.012, "advisory_cost_rate": 0.003, "returns_ytd": 0.134},
+                "meta": {"tier": "Burgundy", "mandate": "Diversified, equity, debt and alternates"},
             },
             "Forex": {
-                "value": "Education remittance — $12,000/yr", "status": "Active", "flag": None,
-                "details": {
-                    "Pattern": "Annual education remittance",
-                    "Amount": "$12,000/year",
-                    "Pricing tier": "Household (Ekam) rate",
-                    "Markup": "~0%",
-                },
+                "status": "Active", "flag": None,
+                "financials": {"annual_usd": 12000, "markup_today": 0.002, "netting_cost_rate": 0.002},
+                "meta": {"pattern": "Annual education remittance, already on household pricing"},
             },
         },
     },
 }
 
 FEED_SEED = {
-    "Rohan Mehta — Salaried, Mumbai": [
-        {"id": 1, "text": "CKYC 2.0 auto-verified identity for loan + forex request — no re-documentation needed.",
+    "Rohan Mehta, Salaried, Mumbai": [
+        {"id": 1, "text": "CKYC 2.0 auto-verified identity for the loan and forex request. No re-documentation needed.",
          "auto": True, "escalate": False},
-        {"id": 2, "text": "Household has 4/6 products + a college remittance pattern — flagging a wealth/education-planning conversation.",
+        {"id": 2, "text": "Household holds 4 of 6 products and shows an education remittance pattern. Flagging a wealth planning conversation.",
          "auto": True, "escalate": True,
-         "why": "Cross-sell judgment call: needs a relationship conversation, not just a system nudge — routed to human steward."},
-        {"id": 3, "text": "Forex priced at netting cost (~0 markup) instead of desk rate — auto-applied, household-level pricing rule.",
+         "why": "This is a judgment call about the relationship, not a system parameter. Routed to the human steward."},
+        {"id": 3, "text": "Forex priced at netting cost instead of desk rate. Applied automatically under the household pricing rule.",
          "auto": True, "escalate": False},
-        {"id": 4, "text": "Income category changed on latest salary credit — recommend reviewing loan eligibility and life-stage needs together.",
+        {"id": 4, "text": "Income category changed on the latest salary credit. Recommend reviewing loan eligibility and life stage needs together.",
          "auto": True, "escalate": True,
-         "why": "Trust moment: a change in life/income circumstances should be a human conversation, not an automated parameter update."},
+         "why": "A change in life or income circumstances should be a human conversation, not an automated update."},
     ],
-    "Priya Nair — MSME Owner": [
-        {"id": 1, "text": "Recurring import remittance volume detected — eligible for household-tier forex pricing upgrade.",
+    "Priya Nair, MSME Owner": [
+        {"id": 1, "text": "Recurring import remittance volume detected. Household is eligible for a forex pricing tier upgrade.",
          "auto": True, "escalate": True,
-         "why": "Pricing tier change affects relationship economics — steward sign-off required."},
-        {"id": 2, "text": "Working capital utilisation pattern stable — no action needed.",
+         "why": "A pricing tier change affects relationship economics and requires steward sign-off."},
+        {"id": 2, "text": "Working capital utilization pattern is stable. No action needed.",
          "auto": True, "escalate": False},
     ],
-    "The Kapoor Family — NRI-Linked": [
-        {"id": 1, "text": "Annual education remittance cycle starting — pre-cleared at household rate, no desk involvement.",
+    "The Kapoor Family, NRI-Linked": [
+        {"id": 1, "text": "Annual education remittance cycle is starting. Pre-cleared at the household rate, no desk involvement required.",
          "auto": True, "escalate": False},
     ],
 }
 
-PRODUCT_ICONS = {
-    "Deposits": "💰", "Loans": "🏠", "Cards": "💳",
-    "Insurance": "🛡️", "Wealth": "📈", "Forex": "🌍",
-}
-
-# Illustrative, same-for-all-households P&L breakdown per silo (₹L)
-PNL_BREAKDOWN = {
-    "Deposits": [("Interest expense paid to customer", -3.5), ("Float income earned", 8.2), ("Net contribution", 4.7)],
-    "Loans": [("Interest income", 28.0), ("Cost of funds", -14.0), ("Credit provisioning", -3.0), ("Opex", -2.0), ("Net margin", 9.0)],
-    "Cards": [("Interchange + fee revenue", 6.0), ("Customer acquisition cost", -1.5), ("Fraud / credit losses", -0.8), ("Net margin", 3.7)],
-    "Insurance": [("Commission revenue", 4.0), ("Servicing cost", -1.0), ("Net margin", 3.0)],
-    "Wealth": [("AUM-based fee revenue", 9.0), ("Advisory / ops cost", -3.0), ("Net margin", 6.0)],
-    "Forex": [("Markup revenue (today)", 7.0), ("Netting cost under Ekam", -6.3), ("Net margin under Ekam", 0.7)],
-}
 PNL_OWNER = {
     "Deposits": ("Deposits P&L head", "Deposit growth"),
     "Loans": ("Loans P&L head", "Disbursement volume"),
-    "Cards": ("Cards P&L head", "Cards issued / spend"),
+    "Cards": ("Cards P&L head", "Cards issued and spend"),
     "Insurance": ("Insurance JV partner", "Policies sold"),
     "Wealth": ("Wealth P&L head", "AUM growth"),
-    "Forex": ("Forex desk", "Margin captured per txn"),
+    "Forex": ("Forex desk", "Margin captured per transaction"),
 }
+
+
+def build_details(product, fin, meta):
+    """Read-only display details, derived from the underlying financials."""
+    meta = meta or {}
+    if product == "Deposits":
+        return {
+            "Balance": inr_plain(fin["balance"]),
+            "Deposit rate paid to customer": f"{fin['deposit_rate'] * 100:.1f} percent per annum",
+            "Bank asset yield on these funds": f"{fin['asset_yield'] * 100:.1f} percent per annum",
+        }
+    if product == "Loans":
+        if fin.get("principal", 0) == 0:
+            return {"Exposure": "None on record"}
+        d = {"Principal amount": inr_plain(fin["principal"]), "Interest rate": f"{fin['rate'] * 100:.2f} percent"}
+        if fin.get("revolving"):
+            d["Type"] = meta.get("type", "Revolving working capital")
+            d["Current utilization"] = f"{fin['utilization'] * 100:.0f} percent"
+        else:
+            d["Tenure"] = f"{fin['tenure_years']} years"
+            d["EMI"] = inr_plain(calc_emi(fin["principal"], fin["rate"], fin["tenure_years"]))
+        if meta.get("purpose"):
+            d["Purpose"] = meta["purpose"]
+        if meta.get("collateral"):
+            d["Collateral"] = meta["collateral"]
+        return d
+    if product == "Cards":
+        return {
+            "Credit limit": inr_plain(fin["limit"]),
+            "Utilization": f"{fin['utilization'] * 100:.0f} percent",
+            "Credit score": str(fin["credit_score"]),
+            "Annual spend": inr_plain(fin["annual_spend"]),
+            "Transaction fee and interchange revenue, annual": inr_plain(fin["annual_spend"] * fin["interchange_rate"] + fin["annual_fee"]),
+            "Customer acquisition cost": inr_plain(fin["acquisition_cost"]),
+        }
+    if product == "Insurance":
+        if fin.get("premium", 0) == 0:
+            d = {"Current cover": "None"}
+            if meta.get("nominee_on_file"):
+                d["Nominee on file"] = meta["nominee_on_file"]
+            if meta.get("signal"):
+                d["Related signal"] = meta["signal"]
+            return d
+        d = {"Policy": meta.get("policy", "Active policy"), "Annual premium": inr_plain(fin["premium"])}
+        if meta.get("sum_assured"):
+            d["Sum assured"] = meta["sum_assured"]
+        if meta.get("renewal"):
+            d["Renewal date"] = meta["renewal"]
+        return d
+    if product == "Wealth":
+        d = {
+            "Portfolio value": inr_plain(fin["aum"]),
+            "Returns, year to date": f"{fin['returns_ytd'] * 100:.1f} percent",
+            "Advisory fee": f"{fin['fee_rate'] * 100:.2f} percent of AUM annually",
+        }
+        if meta.get("risk_profile"):
+            d["Risk profile"] = meta["risk_profile"]
+        if meta.get("mandate"):
+            d["Mandate"] = meta["mandate"]
+        if fin.get("monthly_sip"):
+            d["Monthly SIP"] = inr_plain(fin["monthly_sip"])
+        return d
+    if product == "Forex":
+        inr_value = fin["annual_usd"] * USD_INR
+        d = {
+            "Annual remittance value": f"${fin['annual_usd']:,.0f} ({inr_plain(inr_value)})",
+            "Current markup": f"{fin['markup_today'] * 100:.1f} percent",
+            "Ekam household rate": f"{fin['netting_cost_rate'] * 100:.1f} percent, at processing cost",
+        }
+        if meta.get("purpose"):
+            d["Purpose"] = meta["purpose"]
+        if meta.get("pattern"):
+            d["Pattern"] = meta["pattern"]
+        return d
+    return {}
+
+
+def build_pnl(product, fin):
+    """Returns (line_items, revenue, net_margin) in rupees, derived from financials."""
+    if product == "Deposits":
+        balance = fin["balance"]
+        interest_expense = -balance * fin["deposit_rate"]
+        float_income = balance * fin["asset_yield"]
+        net = float_income + interest_expense
+        return [("Float income earned on balance", float_income),
+                ("Interest paid to customer", interest_expense),
+                ("Net contribution", net)], float_income, net
+    if product == "Loans":
+        principal = fin.get("principal", 0)
+        if principal == 0:
+            return [("No active exposure", 0)], 0, 0
+        base = principal * fin["utilization"] if fin.get("revolving") else principal
+        interest_income = base * fin["rate"]
+        cost_of_funds = -base * fin["cost_of_funds"]
+        provisioning = -base * fin["provisioning"]
+        opex = -base * fin["opex"]
+        net = interest_income + cost_of_funds + provisioning + opex
+        return [("Interest income", interest_income),
+                ("Cost of funds", cost_of_funds),
+                ("Credit provisioning", provisioning),
+                ("Operating cost", opex),
+                ("Net margin", net)], interest_income, net
+    if product == "Cards":
+        revenue = fin["annual_spend"] * fin["interchange_rate"] + fin["annual_fee"]
+        acquisition = -fin["acquisition_cost"]
+        loss = -fin["annual_spend"] * fin["loss_rate"]
+        net = revenue + acquisition + loss
+        return [("Interchange and fee revenue", revenue),
+                ("Customer acquisition cost", acquisition),
+                ("Credit and fraud losses", loss),
+                ("Net margin", net)], revenue, net
+    if product == "Insurance":
+        premium = fin.get("premium", 0)
+        if premium == 0:
+            return [("No active policy, untapped opportunity", 0)], 0, 0
+        commission = premium * fin.get("commission_rate", 0.15)
+        servicing = -premium * 0.05
+        net = commission + servicing
+        return [("Commission revenue", commission),
+                ("Servicing cost", servicing),
+                ("Net margin", net)], commission, net
+    if product == "Wealth":
+        aum = fin["aum"]
+        fee_revenue = aum * fin["fee_rate"]
+        advisory_cost = -aum * fin["advisory_cost_rate"]
+        net = fee_revenue + advisory_cost
+        return [("AUM-based fee revenue", fee_revenue),
+                ("Advisory and operations cost", advisory_cost),
+                ("Net margin", net)], fee_revenue, net
+    if product == "Forex":
+        inr_value = fin["annual_usd"] * USD_INR
+        markup_revenue = inr_value * fin["markup_today"]
+        processing_cost = -inr_value * fin["netting_cost_rate"]
+        net_today = markup_revenue + processing_cost
+        net_ekam = processing_cost
+        return [("Annual remittance value processed", inr_value),
+                ("Revenue at current desk markup", markup_revenue),
+                ("Processing cost", processing_cost),
+                ("Net margin at current pricing", net_today),
+                ("Net margin under Ekam zero-margin pricing", net_ekam)], markup_revenue, net_today
+    return [], 0, 0
+
 
 # ---------------------------------------------------------------------------
 # SESSION STATE
@@ -291,7 +384,6 @@ PNL_OWNER = {
 if "escalated" not in st.session_state:
     st.session_state.escalated = set()
 if "hh_state" not in st.session_state:
-    # deep copy so admin edits never mutate the seed data
     st.session_state.hh_state = copy.deepcopy(HOUSEHOLDS_SEED)
 if "selected_product" not in st.session_state:
     st.session_state.selected_product = {}
@@ -301,13 +393,14 @@ if "selected_silo" not in st.session_state:
 # ---------------------------------------------------------------------------
 # HEADER
 # ---------------------------------------------------------------------------
-st.title("EKAM — One Customer Graph")
-st.caption("Prototype: banker/steward admin interface, and the P&L engine running underneath it.")
+st.title("Ekam: One Customer Graph")
+st.caption("Live demo accompanying the One Axis 2035 transformation pitch: the steward dashboard bankers "
+           "would use, and the P&L mechanics running underneath it.")
 
-tab1, tab2 = st.tabs(["🧑‍💼 Steward Dashboard", "⚙️ Backend — P&L Engine"])
+tab1, tab2 = st.tabs(["Steward Dashboard", "Operating Model and P&L Engine"])
 
 # ===========================================================================
-# TAB 1 — STEWARD DASHBOARD (banker/admin-facing)
+# TAB 1: STEWARD DASHBOARD
 # ===========================================================================
 with tab1:
     household_name = st.selectbox("Select household", list(st.session_state.hh_state.keys()), key="hh_select_tab1")
@@ -316,85 +409,83 @@ with tab1:
     st.divider()
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Household Health Score", f"{hh['health_score']}/100")
+    c1.metric("Household health score", f"{hh['health_score']} of 100")
     c2.metric("Primacy", hh["primacy"])
     c3.metric("Cross-sell depth", f"{hh['cross_sell_depth']}x")
     c4.metric("Coverage tier", hh["tier"], help=hh["ratio"])
 
-    st.info(f"**One steward. One graph.** Coverage model: {hh['ratio']}")
+    st.info(f"One steward. One graph. Coverage model: {hh['ratio']}")
 
     st.divider()
 
-    # --- Clickable unified product strip ---
-    st.subheader("Household — one view, all products")
-    st.caption("Click a tile to see full details. Tiles flagged with an opportunity also let you add new information.")
+    st.subheader("Household: one view, all products")
+    st.caption("Click a tile to see full detail. Tiles flagged with an opportunity also let you add new information as the bank admin.")
 
     cols = st.columns(6)
     for col, (product, info) in zip(cols, hh["products"].items()):
         with col:
             is_selected = st.session_state.selected_product.get(household_name) == product
-            label = f"{PRODUCT_ICONS.get(product, '')} {product}"
-            if st.button(label, key=f"tile-{household_name}-{product}",
+            if st.button(product, key=f"tile-{household_name}-{product}",
                          use_container_width=True, type="primary" if is_selected else "secondary"):
                 st.session_state.selected_product[household_name] = product
-            st.caption(info["value"])
+                st.rerun()
+            st.caption(info["status"])
             if info["flag"]:
-                st.warning(info["flag"], icon="⚠️")
+                st.warning(info["flag"])
 
-    st.markdown("")  # spacing
+    st.markdown("")
 
     selected = st.session_state.selected_product.get(household_name)
     if selected:
         info = hh["products"][selected]
+        fin = info["financials"]
+        meta = info.get("meta", {})
+        details = build_details(selected, fin, meta)
+
         with st.container(border=True):
-            st.markdown(f"### {PRODUCT_ICONS.get(selected, '')} {selected} — full detail")
+            st.markdown(f"### {selected}: full detail")
             st.caption(f"Status: {info['status']}")
 
-            # Read-only current details
             detail_cols = st.columns(2)
-            items = list(info["details"].items())
+            items = list(details.items())
             half = (len(items) + 1) // 2
             for label, value in items[:half]:
                 detail_cols[0].markdown(f"**{label}:** {value}")
             for label, value in items[half:]:
                 detail_cols[1].markdown(f"**{label}:** {value}")
 
-            # If this tile is a cross-sell / action opportunity, show an add-details form
             if "cross_sell_fields" in info:
                 st.divider()
-                st.markdown("**Add new details (bank admin action)**")
+                st.markdown("**Add new details, bank admin action**")
                 already_added = info.get("added")
                 if already_added:
-                    st.success("✅ Submitted — this household's record now reflects the update below.")
+                    st.success("Submitted. This household's record now reflects the update below.")
                     for label, value in already_added.items():
                         st.write(f"**{label}:** {value}")
                 else:
                     with st.form(key=f"form-{household_name}-{selected}"):
                         entered = {}
                         for field in info["cross_sell_fields"]:
+                            fkey = f"f-{household_name}-{selected}-{field['label']}"
                             if field["type"] == "select":
-                                entered[field["label"]] = st.selectbox(field["label"], field["options"],
-                                                                        key=f"f-{household_name}-{selected}-{field['label']}")
+                                entered[field["label"]] = st.selectbox(field["label"], field["options"], key=fkey)
                             elif field["type"] == "number":
-                                entered[field["label"]] = st.number_input(field["label"], value=field["default"],
-                                                                           key=f"f-{household_name}-{selected}-{field['label']}")
+                                entered[field["label"]] = st.number_input(field["label"], value=field["default"], key=fkey)
                             else:
-                                entered[field["label"]] = st.text_input(field["label"], value=field["default"],
-                                                                         key=f"f-{household_name}-{selected}-{field['label']}")
+                                entered[field["label"]] = st.text_input(field["label"], value=field["default"], key=fkey)
                         submitted = st.form_submit_button("Save to household record")
                         if submitted:
                             info["added"] = entered
                             info["flag"] = None
-                            info["status"] = "Active — pending activation"
+                            info["status"] = "Active, pending activation"
                             st.rerun()
     else:
-        st.caption("👆 Click any product tile above to drill into its details.")
+        st.caption("Click any product tile above to view its full details.")
 
     st.divider()
 
-    # --- AI Steward feed ---
-    st.subheader("AI Steward feed")
-    st.caption("AI-first, human at trust moments — everything below resolves automatically unless it's escalated.")
+    st.subheader("AI steward feed")
+    st.caption("AI-first, human at trust moments. Everything below resolves automatically unless it is escalated.")
 
     for item in FEED_SEED[household_name]:
         key = f"{household_name}-{item['id']}"
@@ -402,128 +493,158 @@ with tab1:
             st.write(item["text"])
             if item["escalate"]:
                 if key in st.session_state.escalated:
-                    st.error(f"🔺 **Escalated to human steward** — {item['why']}")
+                    st.error(f"Escalated to human steward. {item['why']}")
                 else:
                     if st.button("Escalate to human steward", key=f"btn-{key}"):
                         st.session_state.escalated.add(key)
                         st.rerun()
             else:
-                st.success("✅ Resolved automatically — no human action needed", icon="✅")
+                st.success("Resolved automatically. No human action needed.")
 
     st.divider()
 
     st.subheader("Governance")
     g1, g2, g3 = st.columns(3)
-    g1.success("✅ Credit sanction — independent")
-    g2.success("✅ Risk — independent")
-    g3.success("✅ Compliance — independent")
-    st.caption("Three lines of defence never sit inside relationship squads — they read one graph instead of five.")
+    g1.success("Credit sanction: independent")
+    g2.success("Risk: independent")
+    g3.success("Compliance: independent")
+    st.caption("The three lines of defence never sit inside relationship squads. They read one graph instead of five.")
 
 # ===========================================================================
-# TAB 2 — BACKEND: HOW THE P&L ACTUALLY WORKS
+# TAB 2: OPERATING MODEL AND P&L ENGINE
 # ===========================================================================
 with tab2:
-    st.subheader("Product P&L (today) vs Household P&L (Ekam)")
-    st.caption("Same underlying revenue and cost — a different unit of account, ownership, and incentive. "
-               "Click a silo below to see its revenue/cost breakdown.")
+    st.subheader("Product P&L today versus household P&L under Ekam")
+    st.caption("Same underlying revenue and cost, a different unit of account, ownership, and incentive. "
+               "Click a silo below to see its revenue and cost breakdown for the selected household.")
 
     household_name_2 = st.selectbox("Household in view", list(st.session_state.hh_state.keys()), key="hh_select_tab2")
     hh2 = st.session_state.hh_state[household_name_2]
 
-    st.markdown("**Today — six silo P&Ls, nobody owns the household**")
+    st.markdown("**Today: six silo P&Ls, nobody owns the household**")
+
+    silo_results = {}
+    for product, info in hh2["products"].items():
+        line_items, revenue, net = build_pnl(product, info["financials"])
+        silo_results[product] = {"line_items": line_items, "revenue": revenue, "net": net}
 
     scols = st.columns(6)
-    for col, silo in zip(scols, PNL_BREAKDOWN.keys()):
+    for col, silo in zip(scols, hh2["products"].keys()):
         with col:
             is_sel = st.session_state.selected_silo.get(household_name_2) == silo
-            if st.button(f"{PRODUCT_ICONS.get(silo,'')} {silo}", key=f"silo-{household_name_2}-{silo}",
+            if st.button(silo, key=f"silo-{household_name_2}-{silo}",
                          use_container_width=True, type="primary" if is_sel else "secondary"):
                 st.session_state.selected_silo[household_name_2] = silo
-            net_margin = PNL_BREAKDOWN[silo][-1][1]
-            col.caption(f"Net: ₹{net_margin}L")
+                st.rerun()
+            col.caption(f"Net: {inr_l(silo_results[silo]['net'])}")
 
     sel_silo = st.session_state.selected_silo.get(household_name_2)
     if sel_silo:
         owner, incentive = PNL_OWNER[sel_silo]
         with st.container(border=True):
-            st.markdown(f"### {PRODUCT_ICONS.get(sel_silo,'')} {sel_silo} — P&L breakdown")
+            st.markdown(f"### {sel_silo}: P&L breakdown")
             c1, c2 = st.columns(2)
             c1.markdown(f"**Owner today:** {owner}")
             c2.markdown(f"**Incentive tied to:** {incentive}")
 
-            breakdown_df = pd.DataFrame(PNL_BREAKDOWN[sel_silo], columns=["Line item", "₹L"])
+            breakdown_df = pd.DataFrame(
+                [(label, inr_l(value)) for label, value in silo_results[sel_silo]["line_items"]],
+                columns=["Line item", "Amount"],
+            )
             st.dataframe(breakdown_df, hide_index=True, use_container_width=True)
 
-            # Mirror the Tab-1 cross-sell opportunity here, read-only + same form
             product_info = hh2["products"].get(sel_silo, {})
             if "cross_sell_fields" in product_info and "added" not in product_info:
-                st.warning("This silo currently shows an untapped opportunity for this household "
-                           "(see the matching flag in the Steward Dashboard tab).", icon="⚠️")
-                st.markdown("**What we already know (read-only):**")
-                for label, value in product_info["details"].items():
+                st.warning("This silo currently shows an untapped opportunity for this household. "
+                           "See the matching flag on the Steward Dashboard tab.")
+                fin = product_info["financials"]
+                meta = product_info.get("meta", {})
+                st.markdown("**What we already know, read-only:**")
+                for label, value in build_details(sel_silo, fin, meta).items():
                     st.write(f"- **{label}:** {value}")
-                st.caption("➡️ Add this household's new details from the **Steward Dashboard** tab — "
-                           "once saved there, it will show as resolved here too, since both tabs read the same household record.")
+                st.caption("Add this household's new details from the Steward Dashboard tab. Once saved there, "
+                           "it will show as resolved here too, since both tabs read the same household record.")
             elif "added" in product_info:
-                st.success("✅ Opportunity resolved — admin-entered details now feeding into this household's P&L.")
+                st.success("Opportunity resolved. Admin-entered details now feed into this household's P&L.")
                 for label, value in product_info["added"].items():
                     st.write(f"- **{label}:** {value}")
     else:
-        st.caption("👆 Click a silo above to see its revenue/cost breakdown and internal ownership.")
+        st.caption("Click a silo above to see its revenue and cost breakdown and current internal ownership.")
 
+    total_revenue = sum(r["revenue"] for r in silo_results.values())
+    total_net = sum(r["net"] for r in silo_results.values())
     st.caption(
-        "Six-silo view sums to a total revenue and margin — but no single number represents *this household's* "
-        "total relationship value, and no single owner is accountable for it."
+        f"Six-silo total for this household: {inr_l(total_revenue)} revenue, {inr_l(total_net)} net contribution. "
+        "This sum exists in the general ledger, but no single number represents this household's total "
+        "relationship value, and no single owner is accountable for it."
     )
 
     st.divider()
 
-    st.markdown("**Ekam — one household P&L, one steward accountable**")
-    total_revenue = sum(items[0][1] if items[0][1] > 0 else 0 for items in PNL_BREAKDOWN.values())
+    st.markdown("**Ekam: one household P&L, one steward accountable**")
     colA, colB, colC = st.columns(3)
-    colA.metric("Household revenue", f"₹{total_revenue:.1f}L", help="Same underlying revenue — now attributed to one household, not six silos.")
-    colB.metric("Forex margin foregone", "− ₹7L → ~₹0.7L", help="Zero-margin forex is the falsifiable proof the model changed.")
-    colC.metric("Cross-sell synergy gain", "+ ₹5L (est.)", help="Captured because the steward can see and act on the whole graph, not one product at a time.")
+    colA.metric("Household revenue", inr_l(total_revenue),
+                help="Same underlying revenue, now attributed to one household instead of six silos.")
+    forex_fin = hh2["products"]["Forex"]["financials"]
+    forex_today = forex_fin["annual_usd"] * USD_INR * forex_fin["markup_today"]
+    forex_ekam = forex_fin["annual_usd"] * USD_INR * forex_fin["netting_cost_rate"]
+    colB.metric("Forex margin given up", f"{inr_l(forex_today)} to {inr_l(forex_ekam)}",
+                help="Zero-margin forex is the falsifiable proof that the model actually changed.")
+    colC.metric("Net household contribution", inr_l(total_net),
+                help="What the steward is now accountable for, in place of six separate product targets.")
 
     st.divider()
 
-    st.subheader("Transfer pricing — how factories charge squads")
-    st.caption("Product teams don't disappear — they become internal factories, selling capacity to relationship squads at a published internal rate.")
+    st.subheader("Transfer pricing: how factories charge squads")
+    st.caption("Product teams do not disappear. They become internal factories, selling capacity to relationship "
+               "squads at a published internal rate.")
 
     transfer_pricing = pd.DataFrame([
-        {"Factory": "Loans Ops", "Internal rate charged to squad": "Cost-plus SLA rate", "Volume this household": "1 active file"},
-        {"Factory": "Insurance Ops", "Internal rate charged to squad": "Per-policy service fee", "Volume this household": "0 policies (opportunity)"},
-        {"Factory": "Forex Ops", "Internal rate charged to squad": "Netting cost (~0 markup)", "Volume this household": "1 pending remittance"},
-        {"Factory": "Wealth Ops", "Internal rate charged to squad": "bps on AUM serviced", "Volume this household": "₹3.1L SIP book"},
+        {"Factory": "Loans operations", "Internal rate charged to squad": "Cost-plus service level rate",
+         "Volume for this household": hh2["products"]["Loans"]["financials"].get("principal", 0) and inr_l(hh2["products"]["Loans"]["financials"]["principal"]) or "No active file"},
+        {"Factory": "Insurance operations", "Internal rate charged to squad": "Per-policy service fee",
+         "Volume for this household": inr_l(hh2["products"]["Insurance"]["financials"].get("premium", 0)) if hh2["products"]["Insurance"]["financials"].get("premium", 0) else "No active policy"},
+        {"Factory": "Forex operations", "Internal rate charged to squad": "Netting cost, near-zero markup",
+         "Volume for this household": f"${hh2['products']['Forex']['financials']['annual_usd']:,.0f} per year"},
+        {"Factory": "Wealth operations", "Internal rate charged to squad": "Basis points on AUM serviced",
+         "Volume for this household": inr_l(hh2["products"]["Wealth"]["financials"]["aum"])},
     ])
     st.dataframe(transfer_pricing, hide_index=True, use_container_width=True)
-    st.caption(
-        "Council-published rate cards, reviewed annually — this is the mechanism that keeps factory heads as "
-        "capability owners (cost, quality, speed) without letting them own the customer relationship."
-    )
+    st.caption("Council-published rate cards, reviewed annually. This is the mechanism that keeps factory heads "
+               "accountable as capability owners for cost, quality and speed, without letting them own the "
+               "customer relationship.")
 
     st.divider()
 
-    st.subheader("Live impact calculator")
-    st.caption("Drag the assumptions to see the projected 2035 impact recompute.")
+    st.subheader("Enterprise impact model")
+    st.caption("Adjust the assumptions below to see the projected enterprise-level impact recompute. "
+               "Defaults are set to the 2035 targets already stated in the transformation thesis.")
 
-    cross_sell = st.slider("Cross-sell depth (products per customer)", 1.5, 4.0, 2.4, 0.1)
-    casa_bps = st.slider("CASA / primacy uplift (bps)", 0, 400, 150, 10)
-    forex_capture = st.slider("Forex margin retained vs today (%)", 0, 100, 20, 5)
-    customer_base_cr = st.number_input("Customer base (Cr customers)", value=3.0, step=0.5)
+    cross_sell = st.slider("Cross-sell depth, products per customer", 1.5, 3.5, 3.0, 0.1)
+    casa_bps = st.slider("CASA and primacy uplift, basis points", 0, 400, 350, 10)
+    forex_retained = st.slider("Forex margin retained by the bank versus today, percent", 0, 100, 10, 5)
+    customer_base_cr = st.number_input(
+        "Addressable customer base, in crore",
+        value=5.0, step=0.5,
+        help="Set to match the 5 crore-plus base already cited in the transformation thesis.",
+    )
 
-    baseline_fee_per_product = 8000
-    baseline_forex_loss_per_customer = 1200
+    fee_per_product_unit = 100       # Rs per customer, per unit of cross-sell depth, per year
+    forex_value_per_customer = 130   # Rs per customer per year, blended across the addressable base
+    casa_multiplier = 3              # Rs crore per basis point of CASA and primacy uplift
 
-    incremental_cross_sell_revenue = (cross_sell - 1.5) * baseline_fee_per_product * customer_base_cr
-    forex_value_unlocked = baseline_forex_loss_per_customer * (1 - forex_capture / 100) * customer_base_cr
-    casa_value = casa_bps * 0.5
+    cross_sell_component = (cross_sell - 1.5) * fee_per_product_unit * customer_base_cr
+    forex_component = forex_value_per_customer * (1 - forex_retained / 100) * customer_base_cr
+    casa_component = casa_bps * casa_multiplier
 
-    total_impact = round(incremental_cross_sell_revenue + forex_value_unlocked + casa_value, 0)
+    total_impact = round(cross_sell_component + forex_component + casa_component)
 
-    st.metric("Estimated cumulative impact by 2035 (illustrative)", f"₹{total_impact:,.0f} Cr")
+    st.metric("Projected incremental annual profit impact by 2035", f"Rs {total_impact:,.0f} crore")
     st.caption(
-        "⚠️ Illustrative model for pitch purposes — built from the deck's own stated drivers "
-        "(cross-sell depth, CASA/primacy bps, forex margin capture) so every number on screen is traceable "
-        "to an assumption you can defend, not a black box."
+        "This is a modeled run-rate, not a multi-year cumulative figure. It is built from the same three drivers "
+        "stated in the transformation thesis: cross-sell depth, CASA and primacy uplift, and forex margin "
+        "capture, so every input on screen is traceable to an assumption that can be defended in discussion. "
+        "At the stated defaults, the model lands close to the scale of the One Axis synergy programme already "
+        "disclosed, which is the intended check: this is a scale-up of a mechanism already proven to work, "
+        "not an unprecedented bet."
     )
