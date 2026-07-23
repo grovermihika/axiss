@@ -227,6 +227,17 @@ FEED_SEED = {
     ],
 }
 
+STEWARD_ANNUAL_COST = {"Mass": 1800000, "Complex": 9000000, "Private": 24000000}
+STEWARD_HOUSEHOLDS_SERVED = {"Mass": 4000, "Complex": 325, "Private": 45}
+ACQUISITION_COST_AMORTIZED = {"Mass": 400, "Complex": 3000, "Private": 15000}
+
+BAND_COLORS = {
+    "band1": "#2E7D5B",
+    "band2": "#C48A1C",
+    "band3": "#6B6B6B",
+    "band4": "#8B0045",
+}
+
 PNL_OWNER = {
     "Deposits": ("Deposits P&L head", "Deposit growth"),
     "Loans": ("Loans P&L head", "Disbursement volume"),
@@ -376,6 +387,107 @@ def build_pnl(product, fin):
                 ("Net margin at current pricing", net_today),
                 ("Net margin under Ekam zero-margin pricing", net_ekam)], markup_revenue, net_today
     return [], 0, 0
+
+
+def build_household_bands(hh):
+    """
+    The household P&L, four bands:
+      Band 1: Revenue, everything this household earns Axis, including the
+              CASA net interest margin that today's product P&Ls never count.
+      Band 2: Cost to serve, the steward's salary share, servicing, and
+              acquisition cost, amortized.
+      Band 3: Transfer charges and risk or capital charge, what internal
+              factories bill the household team, plus the cost of risk taken.
+      Band 4: Contribution margin, Band 1 minus Band 2 minus Band 3. This is
+              the number the squad is judged on.
+    """
+    tier = hh["tier"]
+    products = hh["products"]
+
+    dep_fin = products["Deposits"]["financials"]
+    casa_nim = dep_fin["balance"] * dep_fin["asset_yield"] - dep_fin["balance"] * dep_fin["deposit_rate"]
+
+    loan_fin = products["Loans"]["financials"]
+    loan_base = loan_fin.get("principal", 0) * (loan_fin.get("utilization", 1.0) if loan_fin.get("revolving") else 1.0)
+    loan_interest = loan_base * loan_fin.get("rate", 0)
+
+    card_fin = products["Cards"]["financials"]
+    card_revenue = card_fin["annual_spend"] * card_fin["interchange_rate"] + card_fin["annual_fee"]
+
+    ins_fin = products["Insurance"]["financials"]
+    ins_revenue = ins_fin.get("premium", 0) * ins_fin.get("commission_rate", 0.15) if ins_fin.get("premium", 0) > 0 else 0
+
+    wealth_fin = products["Wealth"]["financials"]
+    wealth_revenue = wealth_fin["aum"] * wealth_fin["fee_rate"]
+
+    forex_fin = products["Forex"]["financials"]
+    forex_revenue = forex_fin["annual_usd"] * USD_INR * forex_fin["markup_today"]
+
+    revenue_lines = [
+        ("Deposits, CASA net interest margin, the line most product P&Ls never count", casa_nim),
+        ("Loans, interest income", loan_interest),
+        ("Cards, interchange and fee revenue", card_revenue),
+        ("Insurance, commission revenue", ins_revenue),
+        ("Wealth, advisory fee revenue", wealth_revenue),
+        ("Forex, revenue at current pricing", forex_revenue),
+    ]
+    band1_total = sum(v for _, v in revenue_lines)
+
+    steward_cost = STEWARD_ANNUAL_COST[tier] / STEWARD_HOUSEHOLDS_SERVED[tier]
+    acquisition_cost = ACQUISITION_COST_AMORTIZED[tier]
+    ins_servicing = ins_fin.get("premium", 0) * 0.05 if ins_fin.get("premium", 0) > 0 else 0
+    wealth_cost = wealth_fin["aum"] * wealth_fin["advisory_cost_rate"]
+
+    cost_lines = [
+        ("Steward and squad salary share", steward_cost),
+        ("Acquisition cost, amortized over expected tenure", acquisition_cost),
+        ("Card servicing cost", card_fin["acquisition_cost"]),
+        ("Insurance servicing cost", ins_servicing),
+        ("Wealth advisory and operations cost", wealth_cost),
+    ]
+    band2_total = sum(v for _, v in cost_lines)
+
+    loan_cof = loan_base * loan_fin.get("cost_of_funds", 0)
+    loan_risk = loan_base * loan_fin.get("provisioning", 0)
+    card_risk = card_fin["annual_spend"] * card_fin["loss_rate"]
+    forex_processing = forex_fin["annual_usd"] * USD_INR * forex_fin["netting_cost_rate"]
+
+    transfer_lines = [
+        ("Loans factory, internal cost-of-funds charge", loan_cof),
+        ("Loans, risk and capital charge", loan_risk),
+        ("Cards, credit and fraud risk charge", card_risk),
+        ("Forex factory, internal processing charge", forex_processing),
+    ]
+    band3_total = sum(v for _, v in transfer_lines)
+
+    band4_total = band1_total - band2_total - band3_total
+
+    return {
+        "revenue_lines": revenue_lines, "band1": band1_total,
+        "cost_lines": cost_lines, "band2": band2_total,
+        "transfer_lines": transfer_lines, "band3": band3_total,
+        "band4": band4_total,
+    }
+
+
+def render_band(label, value, max_value, color_key, description):
+    color = BAND_COLORS[color_key]
+    width_pct = max(4, min(100, abs(value) / max_value * 100)) if max_value else 4
+    st.markdown(
+        f"""
+        <div style="margin-bottom:6px;">
+            <div style="display:flex; justify-content:space-between; font-size:14px; margin-bottom:2px;">
+                <span><strong>{label}</strong></span>
+                <span><strong>{inr_l(value)}</strong></span>
+            </div>
+            <div style="background:#EEEEEE; border-radius:4px; height:22px; width:100%;">
+                <div style="background:{color}; width:{width_pct:.1f}%; height:22px; border-radius:4px;"></div>
+            </div>
+            <div style="font-size:12px; color:#666666; margin-top:2px;">{description}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +704,56 @@ with tab2:
                 help="Zero-margin forex is the falsifiable proof that the model actually changed.")
     colC.metric("Net household contribution", inr_l(total_net),
                 help="What the steward is now accountable for, in place of six separate product targets.")
+
+    st.divider()
+
+    st.subheader("The household P&L, four bands")
+    st.caption(
+        "A P&L is simply what something earned, minus what it cost, ending in what is left over. Banks "
+        "currently build one per product. This is what one looks like built per household instead, for "
+        f"{household_name_2}."
+    )
+
+    bands = build_household_bands(hh2)
+    max_val = max(abs(bands["band1"]), abs(bands["band2"]), abs(bands["band3"]), abs(bands["band4"]), 1)
+
+    render_band("Band 1: Revenue", bands["band1"], max_val, "band1",
+                "Everything this household earns Axis, across every product, in one line.")
+    with st.expander("See what makes up Band 1"):
+        for label, value in bands["revenue_lines"]:
+            st.write(f"{label}: {inr_l(value)}")
+        st.caption(
+            "The CASA net interest margin is the one line almost no product P&L counts today. When a "
+            "household's deposit sits with the bank, the bank lends that money out at a higher rate than it "
+            "pays the depositor. That spread is real profit this household generates, but it currently sits "
+            "inside the deposits P&L and is invisible to every other product serving the same family."
+        )
+
+    render_band("Band 2: Cost to serve", -bands["band2"], max_val, "band2",
+                "The steward's salary share, servicing costs, and acquisition cost, amortized over the household's expected tenure.")
+    with st.expander("See what makes up Band 2"):
+        for label, value in bands["cost_lines"]:
+            st.write(f"{label}: {inr_l(value)}")
+
+    render_band("Band 3: Transfer charges and risk or capital charge", -bands["band3"], max_val, "band3",
+                "What internal factories bill the household team for manufacturing each product, plus the charge for the risk the household's borrowing carries.")
+    with st.expander("See what makes up Band 3"):
+        for label, value in bands["transfer_lines"]:
+            st.write(f"{label}: {inr_l(value)}")
+        st.caption(
+            "When this household takes a loan, the loans factory charges the household team an internal price "
+            "for manufacturing it, the same way one department invoices another. The risk and capital charge "
+            "exists so a squad cannot look profitable simply by lending recklessly."
+        )
+
+    st.markdown("---")
+    render_band("Band 4: Contribution margin, Band 1 minus Band 2 minus Band 3", bands["band4"], max_val, "band4",
+                "This is the number the squad is judged on.")
+
+    st.caption(
+        "Without this schematic, organizing around the customer is a slogan. With it, the actual accounting "
+        "machinery is visible: one household, one P&L, one number the steward owns."
+    )
 
     st.divider()
 
